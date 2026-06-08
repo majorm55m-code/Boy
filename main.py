@@ -1,10 +1,10 @@
 import os
+import asyncio
 from collections import defaultdict
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIError, APITimeoutError, APIConnectionError
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ========== الإعدادات ==========
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8718072176:AAF6qhvXD3UO17OzClIPRDMXYE4_oYIDr_k")
 API_KEY = os.getenv("BLUESMINDS_API_KEY", "sk-11CpcT60eObiShJYGyhQbVVQDGqFyWmcxzq0rFauR2oc1J3k")
 BASE_URL = "https://api.bluesminds.com/v1"
@@ -12,7 +12,6 @@ DEFAULT_MODEL = "z-ai/glm-5.1"
 ALLOWED_MODELS = ["z-ai/glm-5.1", "gemini-3.1-pro-preview", "gpt-4o"]
 
 client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
-
 user_contexts = defaultdict(list)
 user_models = defaultdict(lambda: DEFAULT_MODEL)
 
@@ -24,7 +23,6 @@ SYSTEM_PROMPT = {
         "Always respond in the same language as the user. Be concise but complete."
     )
 }
-
 MAX_CONTEXT_MESSAGES = 20
 
 def get_context(chat_id: int):
@@ -40,30 +38,49 @@ async def call_ai(chat_id: int, user_text: str) -> str:
         user_contexts[chat_id] = context
 
     model = user_models[chat_id]
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=context,
-            temperature=0.7,
-            max_tokens=2048
-        )
-        reply = response.choices[0].message.content.strip()
-    except Exception as e:
-        reply = f"❌ حدث خطأ أثناء الاتصال بالنموذج:\n`{str(e)}`"
-        return reply
+    max_retries = 2
+    last_error = None
 
-    context.append({"role": "assistant", "content": reply})
-    user_contexts[chat_id] = context
-    return reply
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=context,
+                temperature=0.7,
+                max_tokens=2048,
+                timeout=30
+            )
+            reply = response.choices[0].message.content.strip()
+            context.append({"role": "assistant", "content": reply})
+            user_contexts[chat_id] = context
+            return reply
+        except (APIError, APITimeoutError, APIConnectionError) as e:
+            last_error = e
+            if hasattr(e, 'status_code') and 500 <= e.status_code < 600:
+                if attempt < max_retries:
+                    await asyncio.sleep(1.5)
+                    continue
+            break
+        except Exception as e:
+            last_error = e
+            break
+
+    if last_error:
+        error_msg = str(last_error)
+        if "upstream error" in error_msg:
+            hint = "النموذج غير متاح حالياً بسبب ضغط على الخادم، حاول مرة أخرى بعد قليل أو غير النموذج."
+        elif "Extra data" in error_msg:
+            hint = "الخادم أعاد بيانات غير صالحة، قد يكون اسم النموذج غير صحيح. جرب نموذجاً آخر."
+        else:
+            hint = "تأكد من اسم النموذج أو حاول لاحقاً."
+        return f"❌ حدث خطأ:\n`{error_msg[:200]}`\n💡 {hint}"
+    return "❌ خطأ غير معروف."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 مرحباً! أنا بوت ذكي يعمل بالذكاء الاصطناعي.\n"
         "يمكنني مساعدتك في كتابة الأكواد، الإجابة عن الأسئلة، وغير ذلك.\n\n"
-        "📌 استخدم /model لاختيار النموذج:\n"
-        "- `z-ai/glm-5.1` (الافتراضي)\n"
-        "- `gemini-3.1-pro-preview`\n"
-        "- `gpt-4o`\n\n"
+        "📌 استخدم /model لاختيار أي نموذج تريده.\n"
         "🔄 استخدم /reset لمسح سجل المحادثة.\n"
         "ℹ️ استخدم /help لعرض الأوامر."
     )
@@ -72,29 +89,43 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📋 **الأوامر المتاحة:**\n"
         "/start - بدء المحادثة\n"
-        "/model <الاسم> - تغيير النموذج (مثال: /model gpt-4o)\n"
+        "/model <الاسم> - تغيير النموذج (أي اسم تدعمه الخدمة)\n"
+        "/models - عرض النماذج المقترحة\n"
         "/reset - مسح السياق الحالي\n"
         "/help - هذه القائمة"
+    )
+
+async def models_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📋 نماذج مقترحة (يمكنك استخدام أي نموذج آخر تدعمه الخدمة):\n" +
+        "\n".join([f"- `{m}`" for m in ALLOWED_MODELS]) +
+        "\n\nاستخدم `/model <الاسم>` للتغيير."
     )
 
 async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
+        current = user_models[chat_id]
+        suggestions = "\n".join([f"- `{m}`" for m in ALLOWED_MODELS])
         await update.message.reply_text(
-            f"النموذج الحالي: `{user_models[chat_id]}`\n"
-            "استخدم `/model <الاسم>` للتغيير. النماذج المتاحة:\n" +
-            "\n".join([f"- `{m}`" for m in ALLOWED_MODELS])
+            f"⚙️ النموذج الحالي: `{current}`\n\n"
+            f"📌 نماذج مقترحة:\n{suggestions}\n\n"
+            "🔹 لتغيير النموذج، أرسل:\n`/model <اسم النموذج>`\n"
+            "مثال: `/model gpt-4o`\n\n"
+            "🌐 يمكنك استخدام أي نموذج تدعمه الخدمة."
         )
         return
+
     model_name = context.args[0].strip()
-    if model_name in ALLOWED_MODELS:
-        user_models[chat_id] = model_name
-        await update.message.reply_text(f"✅ تم تغيير النموذج إلى `{model_name}`")
-    else:
-        await update.message.reply_text(
-            f"❌ نموذج غير صالح. النماذج المتاحة:\n" +
-            "\n".join([f"- `{m}`" for m in ALLOWED_MODELS])
-        )
+    if not model_name:
+        await update.message.reply_text("❌ اسم النموذج لا يمكن أن يكون فارغاً.")
+        return
+
+    user_models[chat_id] = model_name
+    await update.message.reply_text(
+        f"✅ تم تعيين النموذج إلى `{model_name}`\n"
+        f"⚠️ تأكد من أن الخدمة تدعم هذا النموذج وإلا ستظهر أخطاء."
+    )
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -119,6 +150,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("models", models_list))
     app.add_handler(CommandHandler("model", set_model))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
