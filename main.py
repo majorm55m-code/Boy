@@ -1,5 +1,4 @@
 import os
-import asyncio
 from collections import defaultdict
 from openai import AsyncOpenAI
 from telegram import Update
@@ -12,12 +11,9 @@ BASE_URL = "https://api.bluesminds.com/v1"
 DEFAULT_MODEL = "z-ai/glm-5.1"
 ALLOWED_MODELS = ["z-ai/glm-5.1", "gemini-3.1-pro-preview", "gpt-4o"]
 
-# OpenAI async client
 client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-# تخزين السياق لكل مستخدم (قائمة رسائل)
 user_contexts = defaultdict(list)
-# تخزين النموذج المفضل لكل مستخدم
 user_models = defaultdict(lambda: DEFAULT_MODEL)
 
 SYSTEM_PROMPT = {
@@ -29,7 +25,7 @@ SYSTEM_PROMPT = {
     )
 }
 
-MAX_CONTEXT_MESSAGES = 20  # عدد الرسائل المخزنة (باستثناء system prompt)
+MAX_CONTEXT_MESSAGES = 20
 
 def get_context(chat_id: int):
     if not user_contexts[chat_id]:
@@ -38,9 +34,7 @@ def get_context(chat_id: int):
 
 async def call_ai(chat_id: int, user_text: str) -> str:
     context = get_context(chat_id)
-    # إضافة رسالة المستخدم
     context.append({"role": "user", "content": user_text})
-    # الحفاظ على ألا يتجاوز السياق الحد الأقصى (system prompt + آخر MAX_CONTEXT_MESSAGES)
     if len(context) > MAX_CONTEXT_MESSAGES + 1:
         context = [SYSTEM_PROMPT] + context[-(MAX_CONTEXT_MESSAGES):]
         user_contexts[chat_id] = context
@@ -56,15 +50,12 @@ async def call_ai(chat_id: int, user_text: str) -> str:
         reply = response.choices[0].message.content.strip()
     except Exception as e:
         reply = f"❌ حدث خطأ أثناء الاتصال بالنموذج:\n`{str(e)}`"
-        # لا نضيف الرد الخاطئ للسياق
         return reply
 
-    # إضافة رد المساعد إلى السياق
     context.append({"role": "assistant", "content": reply})
     user_contexts[chat_id] = context
     return reply
 
-# ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 مرحباً! أنا بوت ذكي يعمل بالذكاء الاصطناعي.\n"
@@ -113,10 +104,8 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text
-    # إعلام بالكتابة
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     reply = await call_ai(chat_id, user_text)
-    # تقسيم الردود الطويلة إذا لزم الأمر (تليغرام حد 4096 حرف)
     if len(reply) > 4096:
         for i in range(0, len(reply), 4096):
             await update.message.reply_text(reply[i:i+4096])
@@ -128,17 +117,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    # تسجيل الأوامر
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("model", set_model))
     app.add_handler(CommandHandler("reset", reset))
-    # معالجة الرسائل النصية
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    # معالج الأخطاء
     app.add_error_handler(error_handler)
-
     print("🤖 البوت يعمل...")
     app.run_polling()
 
