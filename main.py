@@ -25,7 +25,7 @@ import uvicorn
 # ───────────────────────────────────────────────
 load_dotenv()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8718072176:AAGdVgKlOBlF_VBwkrjAeYoYlkH3m1jcsMc")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8718072176:AAF6qhvXD3UO17OzClIPRDMXYE4_oYIDr_k")
 API_KEY = os.getenv("API_KEY", "sk-11CpcT60eObiShJYGyhQbVVQDGqFyWmcxzq0rFauR2oc1J3k")
 BASE_URL = os.getenv("BASE_URL", "https://api.bluesminds.com/v1")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "z-ai/glm-5.1")
